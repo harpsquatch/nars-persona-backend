@@ -1,0 +1,4 @@
+nars.log
+nars.log.*
+.env*
+!.env.example

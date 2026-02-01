@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - FLASK_APP=app.py
+      - FLASK_ENV=production
+      - APP_ENV=production
+      - MYSQLHOST=${MYSQLHOST}
+      - MYSQLUSER=${MYSQLUSER}
+      - MYSQLPASSWORD=${MYSQLPASSWORD}
+      - MYSQLDATABASE=${MYSQLDATABASE}
+      - MYSQL_URL=${MYSQL_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - SECRET_KEY=${SECRET_KEY}
+      - CORS_ENABLED=${CORS_ENABLED}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - DEBUG=${DEBUG}
+      - RESET_DATABASE=false
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    networks:
+      - nars-network
+    restart: always
+
+  db:
+    image: mysql:8.0
+    restart: always
+    command: 
+      - --max_connections=1000
+      - --wait_timeout=28800
+      - --interactive_timeout=28800
+      - --connect_timeout=60
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pmysql"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQLPASSWORD}
+      - MYSQL_DATABASE=${MYSQLDATABASE}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - /opt/backups:/backups
+    ports:
+      - "127.0.0.1:10293:3306"
+    networks:
+      - nars-network
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  nars-network:
+    driver: bridge
