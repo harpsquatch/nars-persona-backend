@@ -2,3 +2,19 @@ nars.log
 nars.log.*
 .env*
 !.env.example
+
+# Virtual environment
+narsvenv/
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Node modules (if any)
+node_modules/
