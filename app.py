@@ -18,7 +18,7 @@ import traceback
 from functools import wraps
 
 # Import local modules
-from models import db, User, Consultation, Feedback, Archetype, Look, ArchetypeLookAssociation, Product
+from models import db, User, Consultation, Feedback, Archetype, Look, ArchetypeLookAssociation, Product, UserProduct, LookHistory, UserWishlist, SeasonalContent
 from config import config
 from algorithm import calculate_consultation_result
 from product_scraper import extract_product_info
@@ -145,9 +145,12 @@ def create_app(config_name='development'):
         try:
             user = get_user_by_email(email)
             
+            # User must exist - no auto-creation
             if not user:
-                user = create_user(email, password)
-            elif not verify_password(db.session, email, password):
+                return jsonify({"msg": "User not found. Please sign up first."}), 404
+            
+            # Verify password
+            if not verify_password(db.session, email, password):
                 return jsonify({"msg": "Invalid credentials"}), 401
             
             # Set token expiration based on remember_me flag
@@ -179,6 +182,106 @@ def create_app(config_name='development'):
             db.session.rollback()
             print(f"Login error: {str(e)}")
             return jsonify({"msg": "An error occurred"}), 500
+
+    @app.route('/signup', methods=['POST'])
+    def signup():
+        """
+        Signup endpoint that creates a user and their first consultation from quiz answers
+        """
+        data = request.get_json()
+        
+        app.logger.info(f"Signup request received with data: {data}")
+        
+        if not data:
+            return jsonify({"msg": "Missing JSON in request"}), 400
+            
+        email = data.get('email')
+        password = data.get('password')
+        answers = data.get('answers')
+        remember_me = data.get('remember_me', False)
+        
+        app.logger.info(f"Email: {email}, Password: {'***' if password else None}, Answers: {answers}, Remember: {remember_me}")
+        
+        if not email or not password:
+            return jsonify({"msg": "Missing email or password"}), 400
+        
+        if not answers or not isinstance(answers, dict):
+            app.logger.error(f"Invalid answers: {answers}, Type: {type(answers)}")
+            return jsonify({"msg": "Missing or invalid quiz answers", "received_type": str(type(answers))}), 400
+        
+        try:
+            # Check if user already exists
+            existing_user = get_user_by_email(email)
+            if existing_user:
+                return jsonify({"msg": "User already exists. Please log in."}), 409
+            
+            # Validate quiz answers
+            required_questions = {f"q{i}" for i in range(1, 11)}
+            missing_questions = required_questions - set(answers.keys())
+            if missing_questions:
+                app.logger.error(f"Missing questions: {missing_questions}")
+                return jsonify({
+                    "error": "Unprocessable Entity",
+                    "message": "Missing required questions",
+                    "details": list(missing_questions),
+                    "received_keys": list(answers.keys())
+                }), 422
+            
+            valid_answers = {'strongly_agree', 'agree', 'neutral', 'disagree', 'strongly_disagree'}
+            for q_num, answer in answers.items():
+                if not isinstance(answer, str) or answer.lower() not in valid_answers:
+                    app.logger.error(f"Invalid answer for {q_num}: '{answer}' (type: {type(answer)})")
+                    return jsonify({
+                        "error": "Unprocessable Entity",
+                        "message": f"Invalid answer for {q_num}",
+                        "received_value": answer,
+                        "valid_options": list(valid_answers)
+                    }), 422
+            
+            # Create user
+            user = create_user(email, password)
+            
+            # Calculate consultation result
+            result = calculate_consultation_result(answers)
+            
+            # Create initial consultation
+            consultation = Consultation(
+                user_id=user.id,
+                answers=answers,
+                result=result,
+                status='completed'
+            )
+            
+            db.session.add(consultation)
+            db.session.commit()
+            
+            # Set token expiration based on remember_me flag
+            expires_delta = timedelta(days=30) if remember_me else timedelta(hours=1)
+            access_token = create_access_token(
+                identity=str(user.id),
+                expires_delta=expires_delta
+            )
+            
+            response_data = {
+                "user": {"id": user.id, "email": user.email},
+                "access_token": access_token,
+                "consultation_id": consultation.id,
+                "result": result
+            }
+            
+            # Generate and store remember token if remember_me is True
+            if remember_me:
+                remember_token = secrets.token_hex(32)
+                user.remember_token = remember_token
+                db.session.commit()
+                response_data["remember_token"] = remember_token
+            
+            return jsonify(response_data), 201
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"Signup error: {str(e)}")
+            return jsonify({"msg": "An error occurred during signup"}), 500
 
     @app.route('/login/token', methods=['POST'])
     def login_with_token():
@@ -419,6 +522,22 @@ def create_app(config_name='development'):
             return jsonify([archetype.to_dict() for archetype in archetypes]), 200
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+    
+    @app.route('/archetypes/by-binary/<string:binary>', methods=['GET'])
+    @jwt_required()
+    def get_archetype_by_binary(binary):
+        """
+        Get archetype by binary representation (e.g., '00000')
+        """
+        try:
+            archetype = Archetype.query.filter_by(binary_representation=binary).first()
+            
+            if not archetype:
+                return jsonify({'error': 'Archetype not found'}), 404
+            
+            return jsonify(archetype.to_dict()), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
 
     @app.route('/archetypes/<int:archetype_id>', methods=['GET'])
     @jwt_required()
@@ -473,6 +592,89 @@ def create_app(config_name='development'):
             return jsonify(result), 200
         except Exception as e:
             print(f"Error getting archetype looks: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/archetypes/by-binary/<string:binary>/looks', methods=['GET'])
+    @jwt_required()
+    def get_archetype_looks_by_binary(binary):
+        """
+        Get looks for an archetype by binary representation (e.g., '00000')
+        Includes personalized product shade recommendations and ownership status
+        """
+        try:
+            # Get user profile for personalized recommendations
+            user_id = get_jwt_identity()
+            user_profile = None
+            
+            try:
+                from models import Consultation
+                consultation = Consultation.query.filter_by(user_id=user_id).order_by(Consultation.created_at.desc()).first()
+                if consultation and consultation.result:
+                    user_profile = consultation.result.get('profile', {})
+            except Exception as e:
+                print(f"Error fetching user profile: {str(e)}")
+            
+            # Get archetype by binary representation
+            archetype = Archetype.query.filter_by(binary_representation=binary).first()
+            
+            if not archetype:
+                return jsonify({"error": "Archetype not found"}), 404
+            
+            # Get looks for this archetype
+            associations = ArchetypeLookAssociation.query.filter_by(archetype_id=archetype.id).all()
+            
+            # Get user's owned products
+            user_products = UserProduct.query.filter_by(user_id=user_id).all()
+            owned_product_ids = {up.product_id for up in user_products}
+            
+            # Group looks by category
+            looks_by_category = {}
+            for assoc in associations:
+                look = Look.query.get(assoc.look_id)
+                category = assoc.category
+                if category not in looks_by_category:
+                    looks_by_category[category] = []
+                
+                # Add look to its category with personalized products
+                look_data = look.to_dict()
+                look_data["tags"] = look.tags.split(",") if look.tags else []
+                
+                # Calculate look completion
+                look_product_ids = [p['id'] for p in look_data.get('products', [])]
+                owned_count = len([pid for pid in look_product_ids if pid in owned_product_ids])
+                total_count = len(look_product_ids)
+                
+                look_data['completion'] = {
+                    'owned_products': owned_count,
+                    'total_products': total_count,
+                    'percentage': round((owned_count / total_count * 100) if total_count > 0 else 0, 1),
+                    'can_create': owned_count == total_count
+                }
+                
+                # Add personalized shade recommendations and ownership to each product
+                if user_profile and 'products' in look_data:
+                    for product_data in look_data['products']:
+                        product = Product.query.get(product_data['id'])
+                        if product:
+                            personalized = product.to_dict(user_profile=user_profile)
+                            product_data.update(personalized)
+                            product_data['owned'] = product.id in owned_product_ids
+                
+                looks_by_category[category].append(look_data)
+            
+            # Format response as list of category groups
+            result = []
+            for cat, category_looks in looks_by_category.items():
+                result.append({
+                    "category": cat,
+                    "looks": category_looks
+                })
+            
+            return jsonify(result), 200
+        except Exception as e:
+            print(f"Error getting archetype looks by binary: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return jsonify({"error": "Internal Server Error"}), 500
 
     @app.route('/admin/archetypes', methods=['POST'])
@@ -698,7 +900,32 @@ def create_app(config_name='development'):
         if not look:
             return jsonify({"error": "Look not found"}), 404
         
-        return jsonify(look.to_dict()), 200
+        # Get user profile for personalized product recommendations
+        user_id = get_jwt_identity()
+        user_profile = None
+        
+        try:
+            # Get user's latest consultation to extract profile
+            from models import Consultation
+            consultation = Consultation.query.filter_by(user_id=user_id).order_by(Consultation.created_at.desc()).first()
+            if consultation and consultation.result:
+                user_profile = consultation.result.get('profile', {})
+        except Exception as e:
+            print(f"Error fetching user profile: {str(e)}")
+        
+        # Convert look to dict with personalized product recommendations
+        look_dict = look.to_dict()
+        
+        # Add personalized shade recommendations to each product
+        if user_profile and 'products' in look_dict:
+            for product_data in look_dict['products']:
+                product = Product.query.get(product_data['id'])
+                if product:
+                    # Get personalized product dict
+                    personalized = product.to_dict(user_profile=user_profile)
+                    product_data.update(personalized)
+        
+        return jsonify(look_dict), 200
 
     @app.route('/looks', methods=['POST'])
     @jwt_required()
@@ -1430,6 +1657,1050 @@ def create_app(config_name='development'):
                 'error': "Failed to process bulk associations",
                 'message': str(e)
             }), 500
+
+    # ============================================
+    # USER PRODUCT COLLECTION ENDPOINTS
+    # ============================================
+    
+    @app.route('/users/collection', methods=['GET'])
+    @jwt_required()
+    def get_user_collection():
+        """Get all products in user's collection"""
+        try:
+            user_id = get_jwt_identity()
+            
+            user_products = UserProduct.query.filter_by(user_id=user_id).all()
+            
+            # Get full product details
+            collection = []
+            for up in user_products:
+                product = Product.query.get(up.product_id)
+                if product:
+                    product_dict = product.to_dict()
+                    product_dict['added_at'] = up.added_at.isoformat() if up.added_at else None
+                    product_dict['notes'] = up.notes
+                    collection.append(product_dict)
+            
+            return jsonify(collection), 200
+        except Exception as e:
+            print(f"Error getting user collection: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/collection/<int:product_id>', methods=['POST'])
+    @jwt_required()
+    def add_to_collection(product_id):
+        """Add a product to user's collection with makeup bag details"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json() or {}
+            
+            # Check if product exists
+            product = Product.query.get(product_id)
+            if not product:
+                return jsonify({"error": "Product not found"}), 404
+            
+            # Check if already in collection
+            existing = UserProduct.query.filter_by(user_id=user_id, product_id=product_id).first()
+            if existing:
+                return jsonify({"message": "Product already in collection"}), 200
+            
+            # Parse dates if provided
+            expiration_date = None
+            purchase_date = None
+            
+            if data.get('expiration_date'):
+                from datetime import datetime
+                expiration_date = datetime.strptime(data['expiration_date'], '%Y-%m-%d').date()
+            
+            if data.get('purchase_date'):
+                from datetime import datetime
+                purchase_date = datetime.strptime(data['purchase_date'], '%Y-%m-%d').date()
+            
+            # Add to collection
+            user_product = UserProduct(
+                user_id=user_id,
+                product_id=product_id,
+                notes=data.get('notes', ''),
+                expiration_date=expiration_date,
+                purchase_date=purchase_date,
+                usage_count=0
+            )
+            db.session.add(user_product)
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Product added to collection",
+                "product": product.to_dict()
+            }), 201
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error adding to collection: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/collection/<int:product_id>', methods=['DELETE'])
+    @jwt_required()
+    def remove_from_collection(product_id):
+        """Remove a product from user's collection"""
+        try:
+            user_id = get_jwt_identity()
+            
+            user_product = UserProduct.query.filter_by(user_id=user_id, product_id=product_id).first()
+            if not user_product:
+                return jsonify({"error": "Product not in collection"}), 404
+            
+            db.session.delete(user_product)
+            db.session.commit()
+            
+            return jsonify({"message": "Product removed from collection"}), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error removing from collection: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/collection/check', methods=['POST'])
+    @jwt_required()
+    def check_products_in_collection():
+        """Check which products from a list are in user's collection"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json()
+            product_ids = data.get('product_ids', [])
+            
+            if not product_ids:
+                return jsonify({"owned_product_ids": []}), 200
+            
+            user_products = UserProduct.query.filter(
+                UserProduct.user_id == user_id,
+                UserProduct.product_id.in_(product_ids)
+            ).all()
+            
+            owned_ids = [up.product_id for up in user_products]
+            
+            return jsonify({"owned_product_ids": owned_ids}), 200
+        except Exception as e:
+            print(f"Error checking collection: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/looks/<int:look_id>/completion', methods=['GET'])
+    @jwt_required()
+    def get_look_completion(look_id):
+        """Get completion status for a look (which products user owns)"""
+        try:
+            user_id = get_jwt_identity()
+            
+            look = Look.query.get(look_id)
+            if not look:
+                return jsonify({"error": "Look not found"}), 404
+            
+            # Get all products for this look
+            look_product_ids = [p.id for p in look.products]
+            
+            # Get owned products
+            user_products = UserProduct.query.filter(
+                UserProduct.user_id == user_id,
+                UserProduct.product_id.in_(look_product_ids)
+            ).all()
+            
+            owned_ids = [up.product_id for up in user_products]
+            
+            # Calculate completion
+            total_products = len(look_product_ids)
+            owned_products = len(owned_ids)
+            completion_percentage = (owned_products / total_products * 100) if total_products > 0 else 0
+            
+            # Get missing products
+            missing_products = []
+            for product in look.products:
+                if product.id not in owned_ids:
+                    missing_products.append(product.to_dict())
+            
+            return jsonify({
+                "look_id": look_id,
+                "look_name": look.name,
+                "total_products": total_products,
+                "owned_products": owned_products,
+                "completion_percentage": round(completion_percentage, 1),
+                "can_create": owned_products == total_products,
+                "missing_products": missing_products,
+                "owned_product_ids": owned_ids
+            }), 200
+        except Exception as e:
+            print(f"Error getting look completion: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/shopping-list', methods=['GET'])
+    @jwt_required()
+    def get_shopping_list():
+        """Generate shopping list of products user doesn't own from their looks"""
+        try:
+            user_id = get_jwt_identity()
+            user = User.query.get(user_id)
+            
+            if not user:
+                return jsonify({"error": "User not found"}), 404
+            
+            # Get user's latest consultation and archetype
+            latest_consultation = Consultation.query.filter_by(user_id=user.id)\
+                                                    .order_by(Consultation.created_at.desc())\
+                                                    .first()
+            
+            if not latest_consultation or not latest_consultation.result.get('archetype_id'):
+                return jsonify({"shopping_list": [], "message": "No archetype found"}), 200
+            
+            archetype_id = latest_consultation.result.get('archetype_id')
+            
+            # Get archetype and its looks
+            archetype = Archetype.query.filter_by(binary_representation=archetype_id).first()
+            if not archetype:
+                return jsonify({"shopping_list": [], "message": "Archetype not found"}), 200
+            
+            # Get all looks for this archetype
+            associations = ArchetypeLookAssociation.query.filter_by(archetype_id=archetype.id).all()
+            look_ids = [assoc.look_id for assoc in associations]
+            looks = Look.query.filter(Look.id.in_(look_ids)).all()
+            
+            # Get all products from these looks
+            all_product_ids = set()
+            product_look_map = {}  # Map product_id to list of looks
+            
+            for look in looks:
+                for product in look.products:
+                    all_product_ids.add(product.id)
+                    if product.id not in product_look_map:
+                        product_look_map[product.id] = []
+                    product_look_map[product.id].append({
+                        'look_id': look.id,
+                        'look_name': look.name
+                    })
+            
+            # Get owned products
+            user_products = UserProduct.query.filter(
+                UserProduct.user_id == user_id,
+                UserProduct.product_id.in_(all_product_ids)
+            ).all()
+            
+            owned_ids = {up.product_id for up in user_products}
+            
+            # Build shopping list (products not owned)
+            shopping_list = []
+            for product_id in all_product_ids:
+                if product_id not in owned_ids:
+                    product = Product.query.get(product_id)
+                    if product:
+                        product_dict = product.to_dict()
+                        product_dict['used_in_looks'] = product_look_map.get(product_id, [])
+                        product_dict['priority'] = len(product_look_map.get(product_id, []))  # Priority by number of looks
+                        shopping_list.append(product_dict)
+            
+            # Sort by priority (most used products first)
+            shopping_list.sort(key=lambda x: x['priority'], reverse=True)
+            
+            return jsonify({
+                "shopping_list": shopping_list,
+                "total_items": len(shopping_list),
+                "total_owned": len(owned_ids),
+                "total_products": len(all_product_ids)
+            }), 200
+        except Exception as e:
+            print(f"Error generating shopping list: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+
+    # ============================================
+    # LOOK HISTORY & PROGRESS ENDPOINTS
+    # ============================================
+    
+    @app.route('/users/look-history', methods=['GET'])
+    @jwt_required()
+    def get_look_history():
+        """Get user's look history with ratings"""
+        try:
+            user_id = get_jwt_identity()
+            
+            history = LookHistory.query.filter_by(user_id=user_id)\
+                                      .order_by(LookHistory.tried_at.desc())\
+                                      .all()
+            
+            return jsonify([h.to_dict() for h in history]), 200
+        except Exception as e:
+            print(f"Error getting look history: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/looks/<int:look_id>/mark-tried', methods=['POST'])
+    @jwt_required()
+    def mark_look_tried(look_id):
+        """Mark a look as tried with optional rating and notes"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json() or {}
+            
+            # Check if look exists
+            look = Look.query.get(look_id)
+            if not look:
+                return jsonify({"error": "Look not found"}), 404
+            
+            # Check if already tried
+            existing = LookHistory.query.filter_by(user_id=user_id, look_id=look_id).first()
+            
+            if existing:
+                # Update existing entry
+                if 'rating' in data:
+                    existing.rating = data['rating']
+                if 'notes' in data:
+                    existing.notes = data['notes']
+                if 'difficulty_rating' in data:
+                    existing.difficulty_rating = data['difficulty_rating']
+                if 'time_taken' in data:
+                    existing.time_taken = data['time_taken']
+                existing.tried_at = datetime.utcnow()  # Update timestamp
+            else:
+                # Create new entry
+                history_entry = LookHistory(
+                    user_id=user_id,
+                    look_id=look_id,
+                    rating=data.get('rating'),
+                    notes=data.get('notes'),
+                    difficulty_rating=data.get('difficulty_rating'),
+                    time_taken=data.get('time_taken')
+                )
+                db.session.add(history_entry)
+            
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Look marked as tried",
+                "look_id": look_id
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error marking look as tried: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/looks/<int:look_id>/instructions/progress', methods=['PUT'])
+    @jwt_required()
+    def update_instruction_progress(look_id):
+        """Update which instructions have been completed for a look"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json()
+            
+            if 'completed_instructions' not in data:
+                return jsonify({"error": "completed_instructions is required"}), 400
+            
+            completed_instructions = data['completed_instructions']
+            if not isinstance(completed_instructions, list):
+                return jsonify({"error": "completed_instructions must be an array"}), 400
+            
+            # Get or create look history entry
+            history_entry = LookHistory.query.filter_by(user_id=user_id, look_id=look_id).first()
+            
+            if not history_entry:
+                # Create new entry if it doesn't exist
+                history_entry = LookHistory(
+                    user_id=user_id,
+                    look_id=look_id,
+                    completed_instructions=completed_instructions
+                )
+                db.session.add(history_entry)
+            else:
+                # Update existing entry
+                history_entry.completed_instructions = completed_instructions
+            
+            db.session.commit()
+            
+            # Calculate progress percentage
+            look = Look.query.get(look_id)
+            total_instructions = len(look.instructions) if look and look.instructions else 0
+            completed_count = len(completed_instructions)
+            progress_percentage = (completed_count / total_instructions * 100) if total_instructions > 0 else 0
+            
+            return jsonify({
+                "message": "Instruction progress updated",
+                "completed_instructions": completed_instructions,
+                "progress_percentage": round(progress_percentage, 2),
+                "completed_count": completed_count,
+                "total_instructions": total_instructions
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error updating instruction progress: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/looks/<int:look_id>/rating', methods=['PUT'])
+    @jwt_required()
+    def update_look_rating(look_id):
+        """Update rating for a tried look"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json()
+            
+            if 'rating' not in data:
+                return jsonify({"error": "Rating is required"}), 400
+            
+            rating = data['rating']
+            if not isinstance(rating, int) or rating < 1 or rating > 5:
+                return jsonify({"error": "Rating must be between 1 and 5"}), 400
+            
+            history_entry = LookHistory.query.filter_by(user_id=user_id, look_id=look_id).first()
+            
+            if not history_entry:
+                return jsonify({"error": "Look not tried yet"}), 404
+            
+            history_entry.rating = rating
+            if 'notes' in data:
+                history_entry.notes = data['notes']
+            if 'difficulty_rating' in data:
+                history_entry.difficulty_rating = data['difficulty_rating']
+            
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Rating updated",
+                "rating": rating
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error updating rating: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/progress', methods=['GET'])
+    @jwt_required()
+    def get_user_progress():
+        """Get user's skill progression and statistics"""
+        try:
+            user_id = get_jwt_identity()
+            
+            # Get all tried looks
+            history = LookHistory.query.filter_by(user_id=user_id).all()
+            
+            if not history:
+                return jsonify({
+                    "total_looks_tried": 0,
+                    "skill_level": "Beginner",
+                    "skill_points": 0,
+                    "next_level_points": 100,
+                    "progress_percentage": 0,
+                    "average_rating": 0,
+                    "total_time_spent": 0,
+                    "achievements": []
+                }), 200
+            
+            # Calculate statistics
+            total_looks_tried = len(history)
+            total_time = sum([h.time_taken for h in history if h.time_taken]) or 0
+            ratings = [h.rating for h in history if h.rating]
+            avg_rating = sum(ratings) / len(ratings) if ratings else 0
+            
+            # Calculate skill level based on looks tried and difficulty
+            skill_points = 0
+            
+            for entry in history:
+                # Base points for completing a look
+                skill_points += 10
+                
+                # Bonus for rating
+                if entry.rating:
+                    skill_points += entry.rating
+                
+                # Bonus for difficulty
+                look = Look.query.get(entry.look_id)
+                if look:
+                    if look.expertise_required == 'Beginner':
+                        skill_points += 5
+                    elif look.expertise_required == 'Intermediate':
+                        skill_points += 15
+                    elif look.expertise_required == 'Advanced':
+                        skill_points += 30
+            
+            # Determine skill level
+            if skill_points < 100:
+                skill_level = "Beginner"
+                next_level_points = 100
+            elif skill_points < 300:
+                skill_level = "Intermediate"
+                next_level_points = 300
+            elif skill_points < 600:
+                skill_level = "Advanced"
+                next_level_points = 600
+            else:
+                skill_level = "Expert"
+                next_level_points = skill_points  # Already maxed
+            
+            progress_percentage = (skill_points / next_level_points * 100) if next_level_points > 0 else 100
+            
+            # Calculate achievements
+            achievements = []
+            if total_looks_tried >= 1:
+                achievements.append({"name": "First Look", "icon": "🎨", "unlocked": True})
+            if total_looks_tried >= 5:
+                achievements.append({"name": "Makeup Explorer", "icon": "✨", "unlocked": True})
+            if total_looks_tried >= 10:
+                achievements.append({"name": "Beauty Enthusiast", "icon": "💄", "unlocked": True})
+            if total_looks_tried >= 25:
+                achievements.append({"name": "Makeup Master", "icon": "👑", "unlocked": True})
+            if avg_rating >= 4.5:
+                achievements.append({"name": "Perfectionist", "icon": "⭐", "unlocked": True})
+            
+            # Check for advanced looks
+            advanced_looks = [h for h in history if Look.query.get(h.look_id) and Look.query.get(h.look_id).expertise_required == 'Advanced']
+            if len(advanced_looks) >= 3:
+                achievements.append({"name": "Advanced Artist", "icon": "🎭", "unlocked": True})
+            
+            return jsonify({
+                "total_looks_tried": total_looks_tried,
+                "skill_level": skill_level,
+                "skill_points": skill_points,
+                "next_level_points": next_level_points,
+                "progress_percentage": round(progress_percentage, 1),
+                "average_rating": round(avg_rating, 1),
+                "total_time_spent": total_time,
+                "achievements": achievements,
+                "recent_looks": [h.to_dict() for h in history[:5]]  # Last 5 looks
+            }), 200
+        except Exception as e:
+            print(f"Error getting user progress: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+
+    # ============================================
+    # VIRTUAL MAKEUP BAG ENDPOINTS
+    # ============================================
+    
+    @app.route('/users/makeup-bag', methods=['GET'])
+    @jwt_required()
+    def get_makeup_bag():
+        """Get user's virtual makeup bag with usage insights"""
+        try:
+            user_id = get_jwt_identity()
+            
+            user_products = UserProduct.query.filter_by(user_id=user_id).all()
+            
+            # Get full product details with bag info
+            bag_items = []
+            for up in user_products:
+                product = Product.query.get(up.product_id)
+                if product:
+                    product_dict = product.to_dict()
+                    bag_info = up.to_dict()
+                    product_dict.update(bag_info)
+                    bag_items.append(product_dict)
+            
+            # Calculate insights
+            total_products = len(bag_items)
+            expiring_soon = len([item for item in bag_items if item.get('is_expiring_soon')])
+            expired = len([item for item in bag_items if item.get('is_expired')])
+            frequently_used = [item for item in bag_items if item.get('usage_count', 0) >= 5]
+            rarely_used = [item for item in bag_items if item.get('usage_count', 0) < 2]
+            
+            return jsonify({
+                "items": bag_items,
+                "insights": {
+                    "total_products": total_products,
+                    "expiring_soon": expiring_soon,
+                    "expired": expired,
+                    "frequently_used": len(frequently_used),
+                    "rarely_used": len(rarely_used)
+                }
+            }), 200
+        except Exception as e:
+            print(f"Error getting makeup bag: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/collection/<int:product_id>/update', methods=['PUT'])
+    @jwt_required()
+    def update_product_in_bag(product_id):
+        """Update product details in makeup bag"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json()
+            
+            user_product = UserProduct.query.filter_by(user_id=user_id, product_id=product_id).first()
+            if not user_product:
+                return jsonify({"error": "Product not in collection"}), 404
+            
+            # Update fields
+            if 'notes' in data:
+                user_product.notes = data['notes']
+            
+            if 'expiration_date' in data:
+                if data['expiration_date']:
+                    from datetime import datetime
+                    user_product.expiration_date = datetime.strptime(data['expiration_date'], '%Y-%m-%d').date()
+                else:
+                    user_product.expiration_date = None
+            
+            if 'purchase_date' in data:
+                if data['purchase_date']:
+                    from datetime import datetime
+                    user_product.purchase_date = datetime.strptime(data['purchase_date'], '%Y-%m-%d').date()
+                else:
+                    user_product.purchase_date = None
+            
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Product updated",
+                "product": user_product.to_dict()
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error updating product in bag: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/collection/<int:product_id>/use', methods=['POST'])
+    @jwt_required()
+    def log_product_use(product_id):
+        """Log usage of a product"""
+        try:
+            user_id = get_jwt_identity()
+            
+            user_product = UserProduct.query.filter_by(user_id=user_id, product_id=product_id).first()
+            if not user_product:
+                return jsonify({"error": "Product not in collection"}), 404
+            
+            # Update usage
+            user_product.usage_count = (user_product.usage_count or 0) + 1
+            user_product.last_used = datetime.utcnow()
+            
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Usage logged",
+                "usage_count": user_product.usage_count,
+                "last_used": user_product.last_used.isoformat()
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error logging product use: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/makeup-bag/reminders', methods=['GET'])
+    @jwt_required()
+    def get_reminders():
+        """Get replenishment reminders"""
+        try:
+            user_id = get_jwt_identity()
+            from datetime import date, timedelta
+            
+            user_products = UserProduct.query.filter_by(user_id=user_id).all()
+            
+            reminders = []
+            
+            for up in user_products:
+                product = Product.query.get(up.product_id)
+                if not product:
+                    continue
+                
+                reminder_type = None
+                priority = 0
+                message = ""
+                
+                # Check expiration
+                if up.expiration_date:
+                    days_until_expiry = (up.expiration_date - date.today()).days
+                    if days_until_expiry < 0:
+                        reminder_type = "expired"
+                        priority = 3
+                        message = f"{product.name} has expired"
+                    elif days_until_expiry <= 7:
+                        reminder_type = "expiring_urgent"
+                        priority = 2
+                        message = f"{product.name} expires in {days_until_expiry} days"
+                    elif days_until_expiry <= 30:
+                        reminder_type = "expiring_soon"
+                        priority = 1
+                        message = f"{product.name} expires in {days_until_expiry} days"
+                
+                # Check for rarely used products
+                if up.usage_count == 0 and up.added_at:
+                    days_since_added = (datetime.utcnow() - up.added_at).days
+                    if days_since_added > 30:
+                        if not reminder_type:  # Don't override expiration reminders
+                            reminder_type = "unused"
+                            priority = 0
+                            message = f"{product.name} hasn't been used yet"
+                
+                # Check for frequently used (might need replenishment)
+                if up.usage_count and up.usage_count >= 15:
+                    if not reminder_type:  # Don't override other reminders
+                        reminder_type = "replenish"
+                        priority = 1
+                        message = f"{product.name} is frequently used - consider replenishing"
+                
+                if reminder_type:
+                    reminders.append({
+                        "product_id": product.id,
+                        "product_name": product.name,
+                        "product_image": product.image_url,
+                        "type": reminder_type,
+                        "priority": priority,
+                        "message": message,
+                        "usage_count": up.usage_count or 0,
+                        "days_until_expiry": (up.expiration_date - date.today()).days if up.expiration_date else None
+                    })
+            
+            # Sort by priority (highest first)
+            reminders.sort(key=lambda x: x['priority'], reverse=True)
+            
+            return jsonify({
+                "reminders": reminders,
+                "total_reminders": len(reminders)
+            }), 200
+        except Exception as e:
+            print(f"Error getting reminders: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+
+    # ==================== WISHLIST ROUTES ====================
+    
+    @app.route('/users/wishlist', methods=['GET'])
+    @jwt_required()
+    def get_user_wishlist():
+        """Get user's wishlist"""
+        try:
+            user_id = get_jwt_identity()
+            
+            wishlist_items = UserWishlist.query.filter_by(user_id=user_id).order_by(UserWishlist.added_at.desc()).all()
+            
+            items = []
+            for item in wishlist_items:
+                item_dict = item.to_dict()
+                items.append(item_dict)
+            
+            # Calculate total value
+            total_value = sum(item['product']['price'] if item['product'] and item['product'].get('price') else 0 for item in items)
+            
+            return jsonify({
+                "items": items,
+                "total_items": len(items),
+                "total_value": total_value
+            }), 200
+        except Exception as e:
+            print(f"Error getting wishlist: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/wishlist/<int:product_id>', methods=['POST'])
+    @jwt_required()
+    def add_to_wishlist(product_id):
+        """Add product to wishlist"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json() or {}
+            
+            # Check if product exists
+            product = Product.query.get(product_id)
+            if not product:
+                return jsonify({"error": "Product not found"}), 404
+            
+            # Check if already in wishlist
+            existing = UserWishlist.query.filter_by(user_id=user_id, product_id=product_id).first()
+            if existing:
+                return jsonify({"message": "Product already in wishlist", "item": existing.to_dict()}), 200
+            
+            # Add to wishlist
+            wishlist_item = UserWishlist(
+                user_id=user_id,
+                product_id=product_id,
+                occasion=data.get('occasion', 'general'),
+                notes=data.get('notes'),
+                priority=data.get('priority', 0)
+            )
+            db.session.add(wishlist_item)
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Product added to wishlist",
+                "item": wishlist_item.to_dict()
+            }), 201
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error adding to wishlist: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/wishlist/<int:product_id>', methods=['DELETE'])
+    @jwt_required()
+    def remove_from_wishlist(product_id):
+        """Remove product from wishlist"""
+        try:
+            user_id = get_jwt_identity()
+            
+            wishlist_item = UserWishlist.query.filter_by(user_id=user_id, product_id=product_id).first()
+            if not wishlist_item:
+                return jsonify({"error": "Item not found in wishlist"}), 404
+            
+            db.session.delete(wishlist_item)
+            db.session.commit()
+            
+            return jsonify({"message": "Product removed from wishlist"}), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error removing from wishlist: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/wishlist/<int:product_id>/update', methods=['PUT'])
+    @jwt_required()
+    def update_wishlist_item(product_id):
+        """Update wishlist item details"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json()
+            
+            wishlist_item = UserWishlist.query.filter_by(user_id=user_id, product_id=product_id).first()
+            if not wishlist_item:
+                return jsonify({"error": "Item not found in wishlist"}), 404
+            
+            # Update fields
+            if 'occasion' in data:
+                wishlist_item.occasion = data['occasion']
+            if 'notes' in data:
+                wishlist_item.notes = data['notes']
+            if 'priority' in data:
+                wishlist_item.priority = data['priority']
+            
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Wishlist item updated",
+                "item": wishlist_item.to_dict()
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error updating wishlist item: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/users/wishlist/check', methods=['POST'])
+    @jwt_required()
+    def check_wishlist_status():
+        """Check if products are in wishlist"""
+        try:
+            user_id = get_jwt_identity()
+            data = request.get_json()
+            product_ids = data.get('product_ids', [])
+            
+            wishlist_items = UserWishlist.query.filter(
+                UserWishlist.user_id == user_id,
+                UserWishlist.product_id.in_(product_ids)
+            ).all()
+            
+            wishlisted_ids = [item.product_id for item in wishlist_items]
+            
+            return jsonify({
+                "wishlisted_product_ids": wishlisted_ids
+            }), 200
+        except Exception as e:
+            print(f"Error checking wishlist status: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/wishlist/share/<int:user_id>', methods=['GET'])
+    def get_shared_wishlist(user_id):
+        """Get shared wishlist (public route)"""
+        try:
+            user = User.query.get(user_id)
+            if not user:
+                return jsonify({"error": "User not found"}), 404
+            
+            wishlist_items = UserWishlist.query.filter_by(user_id=user_id).order_by(UserWishlist.priority.desc(), UserWishlist.added_at.desc()).all()
+            
+            items = [item.to_dict() for item in wishlist_items]
+            
+            # Group by occasion
+            grouped = {}
+            for item in items:
+                occasion = item['occasion'] or 'general'
+                if occasion not in grouped:
+                    grouped[occasion] = []
+                grouped[occasion].append(item)
+            
+            return jsonify({
+                "user_name": user.email.split('@')[0],  # Use email prefix as name
+                "items": items,
+                "grouped_by_occasion": grouped,
+                "total_items": len(items)
+            }), 200
+        except Exception as e:
+            print(f"Error getting shared wishlist: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+
+    # ==================== SEASONAL CONTENT ROUTES ====================
+    
+    @app.route('/seasonal-content', methods=['GET'])
+    def get_seasonal_content():
+        """Get active seasonal content"""
+        try:
+            from datetime import date
+            
+            # Get content_type filter
+            content_type = request.args.get('type')
+            
+            query = SeasonalContent.query.filter_by(is_active=True)
+            
+            # Filter by content type if provided
+            if content_type:
+                query = query.filter_by(content_type=content_type)
+            
+            # Filter by date range (current date should be within start_date and end_date)
+            today = date.today()
+            query = query.filter(
+                db.or_(
+                    SeasonalContent.start_date.is_(None),
+                    SeasonalContent.start_date <= today
+                )
+            ).filter(
+                db.or_(
+                    SeasonalContent.end_date.is_(None),
+                    SeasonalContent.end_date >= today
+                )
+            )
+            
+            content_items = query.order_by(SeasonalContent.created_at.desc()).all()
+            
+            # Group by content type
+            grouped = {
+                'trends': [],
+                'holidays': [],
+                'look_of_week': []
+            }
+            
+            for item in content_items:
+                item_dict = item.to_dict()
+                
+                # Fetch related looks if any
+                if item.related_look_ids:
+                    import json
+                    look_ids = json.loads(item.related_look_ids)
+                    looks = Look.query.filter(Look.id.in_(look_ids)).all()
+                    item_dict['related_looks'] = [look.to_dict() for look in looks]
+                
+                # Fetch related products if any
+                if item.related_product_ids:
+                    import json
+                    product_ids = json.loads(item.related_product_ids)
+                    products = Product.query.filter(Product.id.in_(product_ids)).all()
+                    item_dict['related_products'] = [product.to_dict() for product in products]
+                
+                if item.content_type in grouped:
+                    grouped[item.content_type].append(item_dict)
+            
+            return jsonify({
+                "content": [item.to_dict() for item in content_items],
+                "grouped": grouped
+            }), 200
+        except Exception as e:
+            print(f"Error getting seasonal content: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/seasonal-content', methods=['POST'])
+    @jwt_required()
+    @admin_required()
+    def create_seasonal_content():
+        """Create new seasonal content (admin only)"""
+        try:
+            data = request.get_json()
+            from datetime import datetime
+            import json
+            
+            content = SeasonalContent(
+                title=data.get('title'),
+                description=data.get('description'),
+                content_type=data.get('content_type', 'trend'),
+                start_date=datetime.strptime(data['start_date'], '%Y-%m-%d').date() if data.get('start_date') else None,
+                end_date=datetime.strptime(data['end_date'], '%Y-%m-%d').date() if data.get('end_date') else None,
+                is_active=data.get('is_active', True),
+                image_url=data.get('image_url'),
+                related_look_ids=json.dumps(data.get('related_look_ids', [])),
+                related_product_ids=json.dumps(data.get('related_product_ids', [])),
+                extra_data=json.dumps(data.get('metadata', {}))
+            )
+            
+            db.session.add(content)
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Seasonal content created",
+                "content": content.to_dict()
+            }), 201
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error creating seasonal content: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/seasonal-content/<int:content_id>', methods=['PUT'])
+    @jwt_required()
+    @admin_required()
+    def update_seasonal_content(content_id):
+        """Update seasonal content (admin only)"""
+        try:
+            content = SeasonalContent.query.get(content_id)
+            if not content:
+                return jsonify({"error": "Content not found"}), 404
+            
+            data = request.get_json()
+            from datetime import datetime
+            import json
+            
+            if 'title' in data:
+                content.title = data['title']
+            if 'description' in data:
+                content.description = data['description']
+            if 'content_type' in data:
+                content.content_type = data['content_type']
+            if 'start_date' in data:
+                content.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+            if 'end_date' in data:
+                content.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+            if 'is_active' in data:
+                content.is_active = data['is_active']
+            if 'image_url' in data:
+                content.image_url = data['image_url']
+            if 'related_look_ids' in data:
+                content.related_look_ids = json.dumps(data['related_look_ids'])
+            if 'related_product_ids' in data:
+                content.related_product_ids = json.dumps(data['related_product_ids'])
+            if 'metadata' in data:
+                content.extra_data = json.dumps(data['metadata'])
+            
+            db.session.commit()
+            
+            return jsonify({
+                "message": "Seasonal content updated",
+                "content": content.to_dict()
+            }), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error updating seasonal content: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
+    
+    @app.route('/seasonal-content/<int:content_id>', methods=['DELETE'])
+    @jwt_required()
+    @admin_required()
+    def delete_seasonal_content(content_id):
+        """Delete seasonal content (admin only)"""
+        try:
+            content = SeasonalContent.query.get(content_id)
+            if not content:
+                return jsonify({"error": "Content not found"}), 404
+            
+            db.session.delete(content)
+            db.session.commit()
+            
+            return jsonify({"message": "Seasonal content deleted"}), 200
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error deleting seasonal content: {str(e)}")
+            return jsonify({"error": "Internal Server Error"}), 500
 
     return app
 

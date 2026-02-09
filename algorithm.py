@@ -68,21 +68,62 @@ def calculate_consultation_result(answers):
     if binary[4] == '1' and binary[2] == '0':
         binary[2] = '1'
     
-    # Step 4: Match binary number to persona
-    persona_map = {
-        '00101': 'Refined Style',
-        '01101': 'Modern Elegance',
-        '10010': 'Bold Spirit',
-        '10110': 'Radiant Simplicity',
-        '11010': 'Authentic Beauty',
-        '11110': 'Creative Expression'
+    # Step 4: Match binary number to archetype
+    # These must match the binary_representation in the Archetype model
+    # Primary mappings that exist in the database
+    primary_archetype_map = {
+        '00000': 'The Minimalist',
+        '11111': 'The Bold Innovator',
+        '01010': 'The Classic Elegance',
+        '10101': 'The Creative Artist',
+        '00011': 'The Natural Glow',
+        '11100': 'The Glamorous',
+        '01100': 'The Versatile Chameleon',
+        '10010': 'The Edgy Rebel',
+    }
+    
+    # Map other possible binary combinations to the closest archetype
+    # This ensures all generated binaries map to an existing archetype in the database
+    fallback_archetype_map = {
+        '00001': '00000',  # -> The Minimalist
+        '00010': '00000',  # -> The Minimalist
+        '00100': '01100',  # -> The Versatile Chameleon
+        '00101': '01010',  # -> The Classic Elegance
+        '00110': '01100',  # -> The Versatile Chameleon
+        '00111': '00011',  # -> The Natural Glow
+        '01000': '01100',  # -> The Versatile Chameleon
+        '01001': '01010',  # -> The Classic Elegance
+        '01011': '01010',  # -> The Classic Elegance
+        '01101': '01100',  # -> The Versatile Chameleon
+        '01110': '01100',  # -> The Versatile Chameleon
+        '01111': '11100',  # -> The Glamorous
+        '10000': '10010',  # -> The Edgy Rebel
+        '10001': '10101',  # -> The Creative Artist
+        '10011': '10101',  # -> The Creative Artist
+        '10100': '10101',  # -> The Creative Artist
+        '10110': '10101',  # -> The Creative Artist
+        '10111': '10101',  # -> The Creative Artist
+        '11000': '11100',  # -> The Glamorous
+        '11001': '11111',  # -> The Bold Innovator
+        '11010': '11111',  # -> The Bold Innovator (maps legacy 11010)
+        '11011': '11111',  # -> The Bold Innovator
+        '11101': '11111',  # -> The Bold Innovator
+        '11110': '11111',  # -> The Bold Innovator
     }
     
     binary_string = ''.join(binary)
     
+    # If binary exists in primary map, use it directly
+    # Otherwise, map to closest archetype using fallback map
+    if binary_string in primary_archetype_map:
+        mapped_binary = binary_string
+    else:
+        mapped_binary = fallback_archetype_map.get(binary_string, '01100')  # Default to Versatile Chameleon
+    
     result = {
-        'archetype': persona_map.get(binary_string, 'Unknown'),
-        'binary': binary_string,
+        'archetype': primary_archetype_map[mapped_binary],
+        'archetype_id': mapped_binary,  # Store the mapped binary for database lookup
+        'binary': binary_string,  # Keep original binary for reference
         'scores': scores,  # Including raw scores for debugging
     }
     
