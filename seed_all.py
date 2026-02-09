@@ -275,6 +275,9 @@ def seed_all():
                     print(f"  + Created archetype: {arch_data['name']}")
             
             db.session.commit()
+            # Refresh archetype_map to ensure IDs are populated
+            for arch_name in list(archetype_map.keys()):
+                archetype_map[arch_name] = Archetype.query.filter_by(name=arch_name).first()
             print(f"✓ Archetypes seeded: {len(ARCHETYPES)} total")
             
             # 2. Seed Looks
@@ -307,6 +310,9 @@ def seed_all():
                     print(f"  + Created look: {look_data['name']}")
             
             db.session.commit()
+            # Refresh look_map to ensure IDs are populated
+            for look_name in list(look_map.keys()):
+                look_map[look_name] = Look.query.filter_by(name=look_name).first()
             print(f"✓ Looks seeded: {len(LOOKS)} total")
             
             # 3. Seed Products
@@ -332,13 +338,24 @@ def seed_all():
                     print(f"  + Created product: {prod_data['name']}")
             
             db.session.commit()
+            # Refresh product_map to ensure IDs are populated
+            for prod_name in list(product_map.keys()):
+                product_map[prod_name] = Product.query.filter_by(name=prod_name).first()
             print(f"✓ Products seeded: {len(PRODUCTS)} total")
             
             # 4. Associate ALL Looks with ALL Archetypes
             print("\n[4/5] Associating Looks with Archetypes (all-to-all)...")
+            print(f"  Archetypes available: {len(archetype_map)}")
+            print(f"  Looks available: {len(look_map)}")
             associations_created = 0
             for archetype_name, archetype in archetype_map.items():
+                if not archetype or not archetype.id:
+                    print(f"  ! Warning: Archetype '{archetype_name}' has no ID")
+                    continue
                 for look_name, look in look_map.items():
+                    if not look or not look.id:
+                        print(f"  ! Warning: Look '{look_name}' has no ID")
+                        continue
                     existing = ArchetypeLookAssociation.query.filter_by(
                         archetype_id=archetype.id,
                         look_id=look.id
@@ -353,21 +370,28 @@ def seed_all():
                         associations_created += 1
             
             db.session.commit()
-            print(f"✓ Archetype-Look associations: {associations_created} created")
+            print(f"✓ Archetype-Look associations: {associations_created} created (expected: {len(archetype_map) * len(look_map)})")
             
             # 5. Associate Products with Looks
             print("\n[5/5] Associating Products with Looks...")
+            print(f"  Processing {len(LOOK_PRODUCT_MAPPING)} look-product mappings...")
             product_associations_created = 0
             for look_name, product_names in LOOK_PRODUCT_MAPPING.items():
                 look = look_map.get(look_name)
                 if not look:
-                    print(f"  ! Warning: Look '{look_name}' not found")
+                    print(f"  ! Warning: Look '{look_name}' not found in look_map")
+                    continue
+                if not look.id:
+                    print(f"  ! Warning: Look '{look_name}' has no ID")
                     continue
                 
                 for product_name in product_names:
                     product = product_map.get(product_name)
                     if not product:
-                        print(f"  ! Warning: Product '{product_name}' not found")
+                        print(f"  ! Warning: Product '{product_name}' not found in product_map")
+                        continue
+                    if not product.id:
+                        print(f"  ! Warning: Product '{product_name}' has no ID")
                         continue
                     
                     existing = LookProductAssociation.query.filter_by(
@@ -382,6 +406,7 @@ def seed_all():
                         )
                         db.session.add(association)
                         product_associations_created += 1
+                        print(f"  + Associated '{product_name}' with '{look_name}'")
             
             db.session.commit()
             print(f"✓ Look-Product associations: {product_associations_created} created")
