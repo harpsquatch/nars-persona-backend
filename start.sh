@@ -13,6 +13,12 @@ elif [ "$INIT_DATABASE" = "true" ]; then
     python /app/init_db.py || echo "Warning: Database initialization had issues, but continuing..."
 fi
 
+# Check if we should seed the database
+if [ "$SEED_DATABASE" = "true" ]; then
+    echo "Seeding database with initial data..."
+    python /app/seed_all.py || echo "Warning: Database seeding had issues, but continuing..."
+fi
+
 # Verify database connection before starting
 echo "Verifying database connection..."
 python -c "
