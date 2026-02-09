@@ -1,32 +1,30 @@
 #!/bin/bash
 set -e
 
-# Check if we should reset the database
+echo "Starting Container"
+
+# Check if we should reset/initialize the database
 if [ "$RESET_DATABASE" = "true" ]; then
     echo "Resetting database completely..."
     python /app/reset_db.py
-    
-    # Mark all migrations as complete without running them
-    echo "Marking all migrations as complete..."
-    flask db stamp head || echo "Warning: Could not stamp migrations"
-    
     echo "Database reset complete"
-else
-    echo "Running database migrations..."
-    
-    # Try to run migrations, but handle errors gracefully
-    flask db upgrade || {
-        echo "Migration failed. Attempting recovery..."
-        
-        # Try to stamp the current head without running migrations
-        echo "Stamping current migration head..."
-        flask db stamp head || echo "Warning: Could not stamp migrations"
-        
-        # Try to run migrations again
-        echo "Retrying migrations..."
-        flask db upgrade || echo "Warning: Migration still failed, but continuing startup"
-    }
+elif [ "$INIT_DATABASE" = "true" ]; then
+    echo "Initializing database schema..."
+    python /app/init_db.py || echo "Warning: Database initialization had issues, but continuing..."
 fi
 
-echo "Starting Gunicorn server..."
-exec gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 2 --timeout 300 --keep-alive 5 "wsgi:app"
+# Verify database connection before starting
+echo "Verifying database connection..."
+python -c "
+from app import app, db
+with app.app_context():
+    try:
+        db.engine.connect()
+        print('✓ Database connection successful')
+    except Exception as e:
+        print(f'✗ Database connection failed: {e}')
+        exit(1)
+"
+
+echo "Starting Gunicorn server on port ${PORT:-8080}..."
+exec gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 2 --timeout 300 --keep-alive 5 --access-logfile - --error-logfile - "wsgi:app"
