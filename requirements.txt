@@ -10,4 +10,5 @@ gunicorn==21.2.0
 flask_bcrypt 
 requests 
 beautifulsoup4 
-pymysql 
+pymysql
+cryptography
