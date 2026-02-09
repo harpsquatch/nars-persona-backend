@@ -317,15 +317,16 @@ def seed_all():
             
             # 3. Seed Products
             print("\n[3/5] Seeding Products...")
-            product_map = {}
+            product_map = {}  # Using (name, category) as composite key
             for prod_data in PRODUCTS:
                 existing = Product.query.filter_by(name=prod_data['name'], category=prod_data['category']).first()
+                composite_key = (prod_data['name'], prod_data['category'])
                 if existing:
                     # Update existing product with new data
                     existing.image_url = prod_data['image_url']
                     existing.product_url = prod_data['product_url']
-                    print(f"  ↻ Updated product: {prod_data['name']}")
-                    product_map[prod_data['name']] = existing
+                    print(f"  ↻ Updated product: {prod_data['name']} ({prod_data['category']})")
+                    product_map[composite_key] = existing
                 else:
                     product = Product(
                         name=prod_data['name'],
@@ -334,14 +335,15 @@ def seed_all():
                         product_url=prod_data['product_url']
                     )
                     db.session.add(product)
-                    product_map[prod_data['name']] = product
-                    print(f"  + Created product: {prod_data['name']}")
+                    product_map[composite_key] = product
+                    print(f"  + Created product: {prod_data['name']} ({prod_data['category']})")
             
             db.session.commit()
             # Refresh product_map to ensure IDs are populated
-            for prod_name in list(product_map.keys()):
-                product_map[prod_name] = Product.query.filter_by(name=prod_name).first()
-            print(f"✓ Products seeded: {len(PRODUCTS)} total")
+            for composite_key in list(product_map.keys()):
+                name, category = composite_key
+                product_map[composite_key] = Product.query.filter_by(name=name, category=category).first()
+            print(f"✓ Products seeded: {len(product_map)} unique products")
             
             # 4. Associate ALL Looks with ALL Archetypes
             print("\n[4/5] Associating Looks with Archetypes (all-to-all)...")
@@ -386,27 +388,32 @@ def seed_all():
                     continue
                 
                 for product_name in product_names:
-                    product = product_map.get(product_name)
-                    if not product:
+                    # Find product by name (may have multiple categories)
+                    matching_products = [prod for (name, cat), prod in product_map.items() if name == product_name]
+                    
+                    if not matching_products:
                         print(f"  ! Warning: Product '{product_name}' not found in product_map")
                         continue
-                    if not product.id:
-                        print(f"  ! Warning: Product '{product_name}' has no ID")
-                        continue
                     
-                    existing = LookProductAssociation.query.filter_by(
-                        look_id=look.id,
-                        product_id=product.id
-                    ).first()
-                    
-                    if not existing:
-                        association = LookProductAssociation(
+                    # Associate with all matching products (different categories)
+                    for product in matching_products:
+                        if not product or not product.id:
+                            print(f"  ! Warning: Product '{product_name}' has no ID")
+                            continue
+                        
+                        existing = LookProductAssociation.query.filter_by(
                             look_id=look.id,
                             product_id=product.id
-                        )
-                        db.session.add(association)
-                        product_associations_created += 1
-                        print(f"  + Associated '{product_name}' with '{look_name}'")
+                        ).first()
+                        
+                        if not existing:
+                            association = LookProductAssociation(
+                                look_id=look.id,
+                                product_id=product.id
+                            )
+                            db.session.add(association)
+                            product_associations_created += 1
+                            print(f"  + Associated '{product_name}' ({product.category}) with '{look_name}'")
             
             db.session.commit()
             print(f"✓ Look-Product associations: {product_associations_created} created")
