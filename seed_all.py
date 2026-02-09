@@ -71,8 +71,7 @@ LOOKS = [
         "tags": "natural,everyday,minimal,beginner-friendly",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/13914926a6a4d3356bba7d58a154e3c8.jpg,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/399ff3c93d8a992a847e436d3d0b27c0.jpg",
         "expertise_required": "beginner",
-        "application_time": 10,
-        "time_of_day": "MORNING"
+        "application_time": 10
     },
     {
         "name": "Bold Red Lip",
@@ -91,8 +90,7 @@ LOOKS = [
         "tags": "classic,bold,evening,special-occasion",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/65dde589543309e67267094f15a3dcdd.jpg,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/713fbe6ed995f9d882508ef6819aeb3b.jpg",
         "expertise_required": "intermediate",
-        "application_time": 15,
-        "time_of_day": "EVENING"
+        "application_time": 15
     },
     {
         "name": "Smokey Eye",
@@ -113,8 +111,7 @@ LOOKS = [
         "tags": "dramatic,evening,eyes,advanced",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/15de99e030251fce5cf31224678fb758.jpg,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/384b97256684b660fca7f374e4a9b69e.jpg",
         "expertise_required": "advanced",
-        "application_time": 25,
-        "time_of_day": "EVENING"
+        "application_time": 25
     },
     {
         "name": "Fresh Dewy Skin",
@@ -133,8 +130,7 @@ LOOKS = [
         "tags": "natural,glowing,fresh,daytime",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/83fc0432ef91b53cbe8b2ba534c36856.jpg,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/7fd4e5e76e6aa46f29254b31f50f7c02.jpg",
         "expertise_required": "beginner",
-        "application_time": 15,
-        "time_of_day": "MORNING"
+        "application_time": 15
     },
     {
         "name": "Defined Brows & Lashes",
@@ -153,8 +149,7 @@ LOOKS = [
         "tags": "minimal,everyday,eyes,quick",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/9f23dab271821061f36024ea95350a6a.jpg,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/a41cce1a05ff37c7e93102dd9d9d7c5e.jpg",
         "expertise_required": "beginner",
-        "application_time": 10,
-        "time_of_day": "MORNING"
+        "application_time": 10
     },
     {
         "name": "Bronzed Goddess",
@@ -173,8 +168,7 @@ LOOKS = [
         "tags": "bronze,sculpted,warm,summer",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Light%20Smokey%20-%20occhi-sera.png,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Louminos%20Look%20-%20Labra-giorno.png",
         "expertise_required": "intermediate",
-        "application_time": 20,
-        "time_of_day": "SPECIAL_OCCASION"
+        "application_time": 20
     },
     {
         "name": "Colorful Eye Statement",
@@ -195,8 +189,7 @@ LOOKS = [
         "tags": "colorful,bold,creative,statement",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/c2be61f3d6bcd004979ea51b1f61a72c.jpg,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/f06e1c90ac8722892dd31c9ef126c3d9.jpg",
         "expertise_required": "intermediate",
-        "application_time": 20,
-        "time_of_day": "SPECIAL_OCCASION"
+        "application_time": 20
     },
     {
         "name": "Soft Romantic",
@@ -215,8 +208,7 @@ LOOKS = [
         "tags": "romantic,soft,pink,daytime,special-occasion",
         "image_url": "https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/f3d0fbdbaa122760f04239395d37520f.jpg,https://sykoniyfqdaggmtcarkr.supabase.co/storage/v1/object/public/NARS/Looks/5509766f914628cc4ef465d45148aeb1.jpg",
         "expertise_required": "beginner",
-        "application_time": 15,
-        "time_of_day": "SPECIAL_OCCASION"
+        "application_time": 15
     }
 ]
 
@@ -294,7 +286,6 @@ def seed_all():
                     # Update existing look with new data
                     existing.makeup_category = look_data['makeup_category']
                     existing.image_url = look_data['image_url']
-                    existing.time_of_day = look_data.get('time_of_day', 'MORNING')
                     existing.instructions = json.dumps(look_data['instructions'])
                     print(f"  ↻ Updated look: {look_data['name']}")
                     look_map[look_data['name']] = existing
@@ -309,8 +300,7 @@ def seed_all():
                         tags=look_data['tags'],
                         image_url=look_data['image_url'],
                         expertise_required=look_data['expertise_required'],
-                        application_time=look_data['application_time'],
-                        time_of_day=look_data.get('time_of_day', 'MORNING')
+                        application_time=look_data['application_time']
                     )
                     db.session.add(look)
                     look_map[look_data['name']] = look
