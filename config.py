@@ -64,9 +64,13 @@ class ProductionConfig(Config):
         }
     }
     # Ensure we're using environment variables in production
-    SQLALCHEMY_DATABASE_URI = os.getenv('MYSQL_URL')
-    if not SQLALCHEMY_DATABASE_URI:
-        SQLALCHEMY_DATABASE_URI = f'mysql://{os.getenv("MYSQLUSER")}:{os.getenv("MYSQLPASSWORD")}@{os.getenv("MYSQLHOST")}/{os.getenv("MYSQLDATABASE")}'
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    if DATABASE_URL:
+        # Convert mysql:// → mysql+pymysql:// (required for SQLAlchemy)
+        SQLALCHEMY_DATABASE_URI = DATABASE_URL.replace("mysql://", "mysql+pymysql://")
+    else:
+        # Fallback to manual construction
+        SQLALCHEMY_DATABASE_URI = f'mysql+pymysql://{os.getenv("MYSQLUSER")}:{os.getenv("MYSQLPASSWORD")}@{os.getenv("MYSQLHOST")}/{os.getenv("MYSQLDATABASE")}'
 
 # You can add more configurations for different environments
 
