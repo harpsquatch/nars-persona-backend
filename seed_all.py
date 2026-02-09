@@ -248,6 +248,16 @@ LOOK_PRODUCT_MAPPING = {
     "Soft Romantic": ["Sheer Glow Foundation", "Powder Blush", "Afterglow Sensual Shine Lipstick", "Light Reflecting™ Luminizing Powder"]
 }
 
+def determine_category_from_tags(tags):
+    """Determine category based on look tags"""
+    tags_lower = tags.lower()
+    if 'evening' in tags_lower:
+        return 'EVENING'
+    elif 'special-occasion' in tags_lower or 'special' in tags_lower:
+        return 'SPECIAL_OCCASION'
+    else:
+        return 'MORNING'  # Default for everyday/daytime looks
+
 def seed_all():
     """Main seeding function"""
     with app.app_context():
@@ -350,6 +360,12 @@ def seed_all():
             print(f"  Archetypes available: {len(archetype_map)}")
             print(f"  Looks available: {len(look_map)}")
             associations_created = 0
+            
+            # Create a map of look names to their categories
+            look_categories = {}
+            for look_data in LOOKS:
+                look_categories[look_data['name']] = determine_category_from_tags(look_data['tags'])
+            
             for archetype_name, archetype in archetype_map.items():
                 if not archetype or not archetype.id:
                     print(f"  ! Warning: Archetype '{archetype_name}' has no ID")
@@ -364,9 +380,11 @@ def seed_all():
                     ).first()
                     
                     if not existing:
+                        category = look_categories.get(look_name, 'MORNING')
                         association = ArchetypeLookAssociation(
                             archetype_id=archetype.id,
-                            look_id=look.id
+                            look_id=look.id,
+                            category=category
                         )
                         db.session.add(association)
                         associations_created += 1
